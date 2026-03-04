@@ -37,7 +37,7 @@ const DEFAULT_NFA = "0x71cE46099E4b2a2434111C009A7E9CFd69747c8E"; // V4.1 mainne
 const DEFAULT_GUARD = "0x25d17eA0e3Bcb8CA08a2BFE917E817AFc05dbBB3";
 const DEFAULT_RPC = "https://bsc-dataseed1.binance.org";
 const DEFAULT_LISTING_MANAGER = "0x1f9CE85bD0FF75acc3D92eB79f1Eb472f0865071";
-const DEFAULT_LISTING_ID = "0xd2a4cca07c081b6c995654341cf53c6bd18d2316d3242bfe1de9f54c0b723f82";
+const DEFAULT_LISTING_ID = "0x64083b44e38db02749e6e16bf84ce6c19146cc42a108e53324e11f250b15a0b7";
 const PANCAKE_V2_ROUTER = "0x10ED43C718714eb63d5aA57B78B54704E256024E";
 const PANCAKE_V3_SMART_ROUTER = "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4";
 const WBNB = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c";
@@ -455,7 +455,7 @@ function checkActionRecipientSafety(action: Action, vault: Address): RecipientCh
 
 const server = new McpServer({
     name: "shll-defi",
-    version: "5.5.1",
+    version: "5.5.2",
 });
 
 // 鈹€鈹€ Tool: portfolio 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -1738,6 +1738,17 @@ server.tool(
 
         const tokenAddr = token as Address;
         const bnbAmount = parseAmount(amount, 18);
+        if (bnbAmount <= 0n) {
+            return {
+                content: [{
+                    type: "text" as const, text: JSON.stringify({
+                        status: "error",
+                        message: "Invalid amount. four_buy amount must be a positive BNB value.",
+                    })
+                }],
+            };
+        }
+        const vault = await policyClient.getVault(tokenId);
 
         // 1. Get token info
         const info = await publicClient.readContract({
@@ -1746,13 +1757,28 @@ server.tool(
             functionName: "getTokenInfo",
             args: [tokenAddr],
         });
-        const [version, tokenManager, quote, , , , , , , , , liquidityAdded] = info;
+        const [version, tokenManager, quote, , , minTradingFee, , , , , , liquidityAdded] = info;
 
         if (liquidityAdded) {
             return { content: [{ type: "text" as const, text: JSON.stringify({ status: "error", message: "Token has already migrated to DEX. Use the 'swap' tool instead." }) }] };
         }
         if (quote !== "0x0000000000000000000000000000000000000000") {
             return { content: [{ type: "text" as const, text: JSON.stringify({ status: "error", message: `Token uses BEP20 quote (${quote}), not BNB. BEP20 pairs not yet supported.` }) }] };
+        }
+        if (bnbAmount < minTradingFee) {
+            return {
+                content: [{
+                    type: "text" as const, text: JSON.stringify({
+                        status: "error",
+                        message: "Input amount is below Four.meme minimum trading fee threshold.",
+                        next_step: "Increase amount and retry.",
+                        token: tokenAddr,
+                        inputWei: bnbAmount.toString(),
+                        minTradingFeeWei: minTradingFee.toString(),
+                        minTradingFeeBnb: (Number(minTradingFee) / 1e18).toFixed(6),
+                    })
+                }],
+            };
         }
 
         // 2. Pre-calculate
@@ -1763,6 +1789,50 @@ server.tool(
             args: [tokenAddr, 0n, bnbAmount],
         });
         const [, , estimatedAmount, , estimatedFee, amountMsgValue] = tryBuyResult;
+        if (amountMsgValue < minTradingFee) {
+            return {
+                content: [{
+                    type: "text" as const, text: JSON.stringify({
+                        status: "error",
+                        message: "Computed payable amount is below Four.meme minimum trading fee threshold.",
+                        next_step: "Increase amount and retry.",
+                        token: tokenAddr,
+                        payableWei: amountMsgValue.toString(),
+                        minTradingFeeWei: minTradingFee.toString(),
+                        minTradingFeeBnb: (Number(minTradingFee) / 1e18).toFixed(6),
+                    })
+                }],
+            };
+        }
+        if (estimatedAmount <= 0n || amountMsgValue <= 0n) {
+            return {
+                content: [{
+                    type: "text" as const, text: JSON.stringify({
+                        status: "error",
+                        message: "four_buy quote returned zero output. Requested amount is likely too small for this market.",
+                        next_step: "Increase amount and retry.",
+                        token: tokenAddr,
+                    })
+                }],
+            };
+        }
+        const vaultBnbBalance = await publicClient.getBalance({ address: vault });
+        if (amountMsgValue > vaultBnbBalance) {
+            return {
+                content: [{
+                    type: "text" as const, text: JSON.stringify({
+                        status: "error",
+                        message: "Vault BNB balance is insufficient for four_buy.",
+                        next_step: "Deposit more BNB to vault or reduce amount, then retry.",
+                        vault,
+                        requiredBnb: (Number(amountMsgValue) / 1e18).toFixed(6),
+                        availableBnb: (Number(vaultBnbBalance) / 1e18).toFixed(6),
+                        requiredWei: amountMsgValue.toString(),
+                        availableWei: vaultBnbBalance.toString(),
+                    })
+                }],
+            };
+        }
 
         // Align to GWEI precision (Four.meme requirement)
         const minAmount = (estimatedAmount * BigInt(100 - slippage)) / 100n;
@@ -1781,7 +1851,22 @@ server.tool(
         const sim = await policyClient.validate(tokenId, action);
         if (!sim.ok) return { content: [{ type: "text" as const, text: JSON.stringify({ status: "rejected", reason: sim.reason, ...policyRejectionHelp(sim.reason, token_id) }) }] };
 
-        const result = await policyClient.execute(tokenId, action, true);
+        let result: { hash: Hex };
+        try {
+            result = await policyClient.execute(tokenId, action, true);
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : "Unknown execution revert";
+            return {
+                content: [{
+                    type: "text" as const, text: JSON.stringify({
+                        status: "error",
+                        message: "four_buy execution reverted on-chain",
+                        reason: message,
+                        hint: "This is usually market-side failure (amount too small, temporary pool state change, or token-side constraint), not a PolicyGuard rejection.",
+                    })
+                }],
+            };
+        }
         return {
             content: [{
                 type: "text" as const, text: JSON.stringify({

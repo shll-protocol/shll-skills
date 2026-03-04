@@ -20,8 +20,8 @@ const DEFAULT_NFA = "0x71cE46099E4b2a2434111C009A7E9CFd69747c8E"; // V4.1 mainne
 const DEFAULT_GUARD = "0x25d17eA0e3Bcb8CA08a2BFE917E817AFc05dbBB3";
 const DEFAULT_RPC = "https://bsc-dataseed1.binance.org";
 const DEFAULT_LISTING_MANAGER = "0x1f9CE85bD0FF75acc3D92eB79f1Eb472f0865071";
-const DEFAULT_LISTING_ID = "0xd2a4cca07c081b6c995654341cf53c6bd18d2316d3242bfe1de9f54c0b723f82";
-const SKILL_VERSION = "5.5.1";
+const DEFAULT_LISTING_ID = "0x64083b44e38db02749e6e16bf84ce6c19146cc42a108e53324e11f250b15a0b7";
+const SKILL_VERSION = "5.5.2";
 const BINDINGS_UPDATED_AT = "2026-03-02";
 const PANCAKE_V2_ROUTER = "0x10ED43C718714eb63d5aA57B78B54704E256024E";
 const PANCAKE_V3_SMART_ROUTER = "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4";
@@ -2749,6 +2749,10 @@ fourBuyCmd.action(async (opts) => {
         const tokenAddr = opts.token as Address;
         const slippage = Number(opts.slippage);
         const bnbAmount = parseAmount(opts.amount, 18);
+        if (bnbAmount <= 0n) {
+            outputError("Invalid amount.", "four-buy amount must be a positive BNB value.");
+            process.exit(1);
+        }
 
         // 1. Get token info to check status
         const info = await publicClient.readContract({
@@ -2757,7 +2761,7 @@ fourBuyCmd.action(async (opts) => {
             functionName: "getTokenInfo",
             args: [tokenAddr],
         });
-        const [version, tokenManager, quote, , , , , , , , , liquidityAdded] = info;
+        const [version, tokenManager, quote, , , minTradingFee, , , , , , liquidityAdded] = info;
 
         if (liquidityAdded) {
             output({ status: "error", message: "Token has already migrated to DEX. Use the 'swap' command instead of 'four-buy'." });
@@ -2769,6 +2773,20 @@ fourBuyCmd.action(async (opts) => {
             output({ status: "error", message: `Token uses BEP20 quote (${quote}), not BNB. BEP20 quote pairs are not yet supported in this tool.` });
             process.exit(1);
         }
+        if (bnbAmount < minTradingFee) {
+            outputError(
+                "Input amount is below Four.meme minimum trading fee threshold.",
+                "Increase --amount and retry.",
+                {
+                    token: tokenAddr,
+                    inputBnb: opts.amount,
+                    inputWei: bnbAmount.toString(),
+                    minTradingFeeWei: minTradingFee.toString(),
+                    minTradingFeeBnb: (Number(minTradingFee) / 1e18).toFixed(6),
+                },
+            );
+            process.exit(1);
+        }
 
         // 2. Pre-calculate buy estimate
         const tryBuyResult = await publicClient.readContract({
@@ -2778,6 +2796,48 @@ fourBuyCmd.action(async (opts) => {
             args: [tokenAddr, 0n, bnbAmount],
         });
         const [, , estimatedAmount, estimatedCost, estimatedFee, amountMsgValue] = tryBuyResult;
+        if (amountMsgValue < minTradingFee) {
+            outputError(
+                "Computed payable amount is below Four.meme minimum trading fee threshold.",
+                "Increase --amount and retry.",
+                {
+                    token: tokenAddr,
+                    inputBnb: opts.amount,
+                    payableWei: amountMsgValue.toString(),
+                    minTradingFeeWei: minTradingFee.toString(),
+                    minTradingFeeBnb: (Number(minTradingFee) / 1e18).toFixed(6),
+                },
+            );
+            process.exit(1);
+        }
+        if (estimatedAmount <= 0n || amountMsgValue <= 0n) {
+            outputError(
+                "four-buy quote returned zero output.",
+                "Requested amount is likely too small for this market. Increase --amount and retry.",
+                {
+                    token: tokenAddr,
+                    inputBnb: opts.amount,
+                    estimatedCostWei: estimatedCost.toString(),
+                    estimatedFeeWei: estimatedFee.toString(),
+                },
+            );
+            process.exit(1);
+        }
+        const vaultBnbBalance = await publicClient.getBalance({ address: vault });
+        if (amountMsgValue > vaultBnbBalance) {
+            outputError(
+                "Vault BNB balance is insufficient for four-buy.",
+                "Deposit more BNB to vault or reduce --amount, then retry.",
+                {
+                    vault,
+                    requiredBnb: (Number(amountMsgValue) / 1e18).toFixed(6),
+                    availableBnb: (Number(vaultBnbBalance) / 1e18).toFixed(6),
+                    requiredWei: amountMsgValue.toString(),
+                    availableWei: vaultBnbBalance.toString(),
+                },
+            );
+            process.exit(1);
+        }
 
         // Align to GWEI precision (Four.meme requirement)
         const minAmount = (estimatedAmount * BigInt(100 - slippage)) / 100n;
@@ -2818,7 +2878,19 @@ fourBuyCmd.action(async (opts) => {
             process.exit(0);
         }
 
-        const result = await client.execute(tokenId, action, true);
+        let result: { hash: Hex };
+        try {
+            result = await client.execute(tokenId, action, true);
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : "Unknown execution revert";
+            outputError(
+                "four-buy execution reverted on-chain.",
+                "Likely market-side failure (amount too small, temporary pool state change, or token-side constraint).",
+                { reason: message, token: tokenAddr, inputBnb: opts.amount },
+            );
+            process.exit(1);
+            return;
+        }
         output({
             status: "success",
             hash: result.hash,
