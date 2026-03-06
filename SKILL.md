@@ -1,13 +1,34 @@
 ---
 name: shll-run
 description: Execute DeFi transactions on BSC via SHLL AgentNFA. The AI handles all commands and users only need to chat.
-version: 5.5.3
+version: 6.0.0
 author: SHLL Team
 website: https://shll.run
 twitter: https://twitter.com/shllrun
 repository: https://github.com/kledx/shll-skills.git
 install: npm install -g shll-skills --registry https://registry.npmjs.org
 update: npm update -g shll-skills --registry https://registry.npmjs.org
+env:
+  - name: RUNNER_PRIVATE_KEY
+    required: true
+    description: >
+      Operator wallet private key (AI-only hot wallet).
+      MUST be a dedicated wallet with minimal BNB for gas only.
+      NEVER use your main wallet, owner wallet, or any wallet holding significant funds.
+      Even if this key leaks, on-chain PolicyGuard limits actions to policy-approved trades.
+  - name: SHLL_RPC
+    required: false
+    description: Optional BSC RPC URL override. A private RPC is recommended for reliability.
+credentials:
+  scope: operator-hot-wallet-only
+  risk: >
+    The operator key can only execute policy-limited trades within on-chain PolicyGuard rules.
+    It cannot withdraw vault funds, transfer the Agent NFT, or bypass spending limits.
+    Treat it as a restricted session key, not a master key.
+  guidance: >
+    Use generate-wallet to create a purpose-built operator wallet.
+    Fund it with ~$1 BNB for gas only. Do not store trading capital in this wallet.
+    The operator wallet is NOT the owner wallet, NOT the vault, NOT the Agent NFT holder.
 ---
 
 # SHLL Skill Usage Guide
@@ -17,7 +38,6 @@ This file defines how an AI agent should use `shll-run` and `shll-mcp` safely.
 ## Scope
 
 - Network: BSC mainnet
-- Runtime:
 - CLI: `shll-run` (alias: `shll-onchain-runner`)
 - MCP: `shll-mcp`
 - Security layer: SHLL PolicyGuard
@@ -46,15 +66,15 @@ On-chain guardrails:
 
 - PolicyGuard validates each action (`validate`) before execution (`execute` / `executeBatch`).
 - Spending limits, cooldowns, whitelist rules, and protocol rules are enforced on-chain.
-- Raw calldata path is guarded by recipient safety checks before on-chain execution.
+- Raw calldata is blocked if the recipient cannot be decoded safely.
 
-## Current Critical Constraints (v5.5.3)
+## Current Critical Constraints (v6.0.0)
 
 1. `init` command is disabled. Do not use it.
-2. CLI `raw` requires `--i-understand-the-risk`.
+2. Raw calldata remains high risk; rely on strict recipient safety checks.
 3. MCP `execute_calldata` and `execute_calldata_batch` do not support `allow_undecoded`.
 4. If calldata recipient cannot be decoded, execution is blocked.
-5. Core contract addresses are pinned in code, not user-overridable at runtime.
+5. Core contract addresses are pinned in `src/shared/constants.ts`, not user-overridable at runtime.
 
 ## Prerequisites
 
@@ -68,9 +88,9 @@ npm install -g shll-skills --registry https://registry.npmjs.org
 export RUNNER_PRIVATE_KEY="0x..."
 ```
 
-3. Optional custom RPC:
+3. Optional - use a private RPC for better reliability and speed:
 ```bash
-export SHLL_RPC="https://bsc-dataseed1.binance.org"
+export SHLL_RPC="https://your-private-bsc-rpc.example.com"
 ```
 
 4. Ensure operator wallet has small BNB balance for gas.
@@ -79,20 +99,32 @@ export SHLL_RPC="https://bsc-dataseed1.binance.org"
 
 1. Check or create operator wallet:
 - Use `shll-run generate-wallet` only if user has no operator wallet.
-- Immediately instruct user to store the key securely.
+- Immediately explain that this is the operator hot wallet for AI only.
+- Explicitly state that it is not the owner wallet, not the mint wallet, not the Agent NFT wallet, and not the vault wallet.
+- Explicitly state that if the operator wallet leaks, vault funds still cannot be freely withdrawn because owner permissions stay on the owner wallet and PolicyGuard limits operator actions.
+- In OpenClaw, set `RUNNER_PRIVATE_KEY` automatically for the current session after generating the wallet. Do not ask the user to set the environment variable manually.
 
 2. Verify gas:
-- Run `shll-run balance`.
+- Ensure the operator wallet has a small BNB balance for gas.
 
 3. If user has no token ID:
 - Run `shll-run listings`.
-- Ask user to choose template and rental days.
-- Run `shll-run setup-guide --listing-id <id> --days <days>`.
-- Send `setupUrl` to user for browser completion.
+- Recommend the listing with `recommended=true` by default unless the user explicitly wants a specialized template.
+- Run `shll-run setup-guide -l <listingId> -d <days>`.
+- Send `setupUrl` plus the wallet-role explanation.
+- Explicitly warn: do not use the operator wallet to mint, rent, or hold the Agent NFT.
+- Explicitly warn: use the owner wallet in the browser for rental or mint and for operator authorization.
 
 4. User returns with token ID:
+- Run `shll-run status -k <tokenId>`.
 - Run `shll-run portfolio -k <tokenId>`.
-- Confirm readiness and proceed with requested operation.
+- Use `status.readiness.ready`, `status.readiness.blockers`, and `status.readiness.nextActions` as the primary onboarding diagnosis.
+- Automatically check:
+  - operator gas balance
+  - vault BNB balance
+  - vault token balances
+  - access or policy readiness
+- Tell the user whether the agent is ready, and if not, tell them the exact next fix.
 
 ## Write Confirmation Policy
 
@@ -115,8 +147,8 @@ Write commands include:
 - `lend`
 - `redeem`
 - `config`
-- `four-buy`
-- `four-sell`
+- `four_buy`
+- `four_sell`
 
 Read-only commands do not require confirmation.
 
@@ -126,12 +158,11 @@ Read-only commands do not require confirmation.
 
 - `shll-run generate-wallet`
 - `shll-run balance`
-- `shll-run doctor`
 - `shll-run listings`
 - `shll-run setup-guide [-l <listingId>] [-d <days>]`
 - `shll-run init` (disabled)
 
-If `-l/--listing-id` is omitted, `setup-guide` auto-selects an active listing from indexer.
+If `-l/--listing` is omitted, `setup-guide` auto-selects an active listing from the indexer.
 
 ### Trading and vault ops
 
@@ -139,21 +170,20 @@ If `-l/--listing-id` is omitted, `setup-guide` auto-selects an active listing fr
 - `shll-run wrap -a <bnb> -k <tokenId>`
 - `shll-run unwrap -a <bnb> -k <tokenId>`
 - `shll-run transfer --token <symbolOrAddress> -a <amount> --to <address> -k <tokenId>`
-- `shll-run raw --target <address> --data <hex> -k <tokenId> --i-understand-the-risk`
+- `shll-run raw --target <address> --data <hex> -k <tokenId>`
 
 ### Lending (Venus)
 
 - `shll-run lend -t <token> -a <amount> -k <tokenId>`
 - `shll-run redeem -t <token> -a <amount> -k <tokenId>`
-- `shll-run lending-info -k <tokenId>`
 
 ### Four.meme
 
-- `shll-run four-info --token <address>`
-- `shll-run four-buy --token <address> -a <bnb> -k <tokenId>`
-- `shll-run four-sell --token <address> -a <tokenAmount> -k <tokenId>`
+- `shll-run four_info --token <address>`
+- `shll-run four_buy --token <address> -a <bnb> -k <tokenId>`
+- `shll-run four_sell --token <address> -a <tokenAmount> -k <tokenId>`
 
-`four-buy` amount unit is BNB, not USD. If user gives a USD target, convert to BNB first and confirm final BNB amount before execution.
+`four_buy` amount unit is BNB, not USD. If user gives a USD target, convert to BNB first and confirm the final BNB amount before execution.
 
 ### Read-only and audit
 
@@ -164,13 +194,12 @@ If `-l/--listing-id` is omitted, `setup-guide` auto-selects an active listing fr
 - `shll-run policies -k <tokenId>`
 - `shll-run status -k <tokenId>`
 - `shll-run history -k <tokenId> [--limit N]`
-- `shll-run my-agents`
 
 ## MCP Tools: Cross-skill Execution
 
 For external aggregator calldata (OKX, 1inch, etc.):
 
-1. Get quote/calldata from external source.
+1. Get quote/calldata from the external source.
 2. Execute through SHLL MCP:
 - `execute_calldata`
 - `execute_calldata_batch`
@@ -182,59 +211,65 @@ Security requirements:
 
 1. Recipient must resolve to the vault address.
 2. Undecodable recipient calldata is blocked.
-3. Do not ask for "unsafe bypass" parameters.
+3. Do not ask for unsafe bypass parameters.
 
 ## Smart Routing Rule
 
-When user provides a token address:
+When the user provides a token address:
 
-1. Run `four-info --token <addr>`.
-2. If `tradingPhase` is bonding curve, use `four-buy` / `four-sell`.
-3. If `tradingPhase` is DEX (or unsupported), use `swap`.
+1. Run `four_info --token <addr>`.
+2. If `tradingPhase` is bonding curve, use `four_buy` / `four_sell`.
+3. If `tradingPhase` is DEX or unsupported, use `swap`.
 
 ## Common Errors and Fixes
 
 1. `RUNNER_PRIVATE_KEY environment variable is missing`
-- Set `RUNNER_PRIVATE_KEY` and retry.
-- Or run `shll-run doctor` to get guided next steps.
+- In OpenClaw, AI should set `RUNNER_PRIVATE_KEY` automatically for the current session.
+- Outside OpenClaw, set `RUNNER_PRIVATE_KEY` manually and retry.
 
 2. `NOT authorized for token-id`
 - Operator wallet is not authorized; use setup guide or set operator in console.
 
 3. `rental has EXPIRED` or `operator authorization has EXPIRED`
-- Renew subscription/authorization first.
+- Renew subscription or authorization first.
 
-4. `status: rejected`
-- PolicyGuard rejected action; inspect `reason` and adjust limits/whitelists/cooldown.
+4. `status: error` with `errorCode: POLICY_REJECTED`
+- Inspect `details.reason` and adjust limits, whitelists, cooldown, or policy config.
 
 5. `Unable to decode recipient from calldata`
-- Use built-in command flow or provide calldata with decodable vault recipient.
+- Use built-in command flow or provide calldata with a decodable vault recipient.
 
 6. `init command is disabled`
-- Use `setup-guide` flow instead.
+- Use `setup-guide` instead.
 
 7. Unsure what is broken
-- Run `shll-run doctor` for one-shot environment, wallet, RPC, and optional token-id checks.
+- Check the structured `errorCode`, `message`, and `details` fields in the JSON response first.
 
-## Redeploy Checklist (When Contracts Change)
+## Product UX Rules
 
-If AgentNFA / PolicyGuard / ListingManagerV2 / default listing changes:
+1. Never describe `generate-wallet` as if it were the user's main wallet.
+2. Always call it the operator wallet or AI hot wallet.
+3. Always explain the dual-wallet model the first time setup is discussed.
+4. Always warn that the operator wallet must not be used to mint, rent, or hold the Agent NFT.
+5. Do not ask the user to manually set `RUNNER_PRIVATE_KEY` in OpenClaw; AI should do it.
+6. After setup is complete and the user provides a token-id, run readiness checks automatically before asking the user what to do next.
+7. When multiple listings are available, recommend one by default and explain why.
+8. Prefer the structured `status.readiness` fields over ad-hoc prose when deciding the next user-facing instruction.
 
-1. Update constants in:
-- `src/index.ts`
-- `src/mcp.ts`
+## Redeploy Checklist
 
+If AgentNFA, PolicyGuard, ListingManagerV2, or default listing changes:
+
+1. Update constants in `src/shared/constants.ts`.
 2. Validate ABIs if function signatures changed.
-
 3. Rebuild:
 ```bash
 npx tsc --noEmit
 npm run build
 ```
-
 4. Smoke test:
-- `shll-run init` returns disabled error
-- `shll-run raw` blocks without risk flag
+- `shll-run init` still returns disabled
+- raw calldata still blocks undecodable recipients
 - basic read commands still work
 
 ## Expected Output Format
@@ -242,8 +277,7 @@ npm run build
 All runtime responses should stay machine-friendly JSON:
 
 - Success: `{"status":"success", ...}`
-- Rejected: `{"status":"rejected","reason":"..."}`
-- Error: `{"status":"error","message":"..."}`
+- Error: `{"status":"error","errorCode":"...", "message":"...", ...}`
 
 ## Links
 

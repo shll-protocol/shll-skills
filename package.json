@@ -1,7 +1,7 @@
 {
     "name": "shll-skills",
-    "version": "5.5.3",
-    "description": "SHLL DeFi Agent — CLI + MCP Server for BSC",
+    "version": "6.0.0",
+    "description": "SHLL DeFi Agent - CLI + MCP Server for BSC",
     "main": "dist/index.js",
     "bin": {
         "shll-run": "dist/index.js",
@@ -10,7 +10,9 @@
     },
     "scripts": {
         "build": "tsup",
-        "dev": "tsup --watch"
+        "dev": "tsup --watch",
+        "typecheck": "tsc --noEmit",
+        "test": "node --test src/tests/smoke.test.mjs"
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.27.1",
@@ -23,5 +25,14 @@
         "shll-policy-sdk": "^1.0.0",
         "tsup": "^8.0.2",
         "typescript": "^5.4.5"
-    }
+    },
+    "files": [
+        "dist/**/*.js",
+        "dist/**/*.mjs",
+        "dist/**/*.d.ts",
+        "dist/**/*.d.mts",
+        "README.md",
+        "SKILL.md"
+    ],
+    "license": "MIT"
 }
