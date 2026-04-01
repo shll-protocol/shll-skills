@@ -5,5 +5,6 @@ export * from "./lending.js";
 export * from "./transfer.js";
 export * from "./calldata.js";
 export * from "./fourmeme.js";
+export * from "./fourmeme-api.js";
 export * from "./setup.js";
 export * from "./agent.js";
